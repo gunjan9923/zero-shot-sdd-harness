@@ -19,8 +19,15 @@ class AgentState(TypedDict, total=False):
     messages: list                    # prior chat turns [{role, content}] for follow-up context
 
     # Schema/sample context (privacy boundary — what the LLM may see)
-    schema: dict                      # {column: dtype, ...}
-    samples: list                     # bounded sample rows (default 5)
+    schema: dict                      # {column: dtype, ...} (primary file)
+    samples: list                     # bounded sample rows (default 5) (primary file)
+
+    # Multi-file (Phase 3). One entry per selected dataset:
+    # {dataset_id, name, var ("df1"...), file_path, file_type, schema, samples}.
+    # ``file_path``/``file_type`` stay local (used by execute_code) and are NEVER
+    # placed in a prompt. With a single file, ``var`` is "df" and the context
+    # renders exactly as in Phase 1/2.
+    files: list
 
     # Pipeline data (populated progressively by nodes)
     plan: str                         # natural-language approach (plan node)

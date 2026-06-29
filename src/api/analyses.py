@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -83,10 +84,17 @@ def _to_response(row: AnalysisRow) -> AnalysisResponse:
         retry_count=int(row.retry_count or 0),
         chart_spec=_parse_json(row.chart_spec_json),  # Phase 2
         followups=_parse_json(row.followups_json),     # Phase 2
-        tokens=None,            # Phase 3
-        estimated_cost_usd=None,  # Phase 3
+        tokens=_total_tokens(row),                      # Phase 3
+        estimated_cost_usd=row.estimated_cost_usd,      # Phase 3
         error=row.error_message,
     )
+
+
+def _total_tokens(row: AnalysisRow) -> int | None:
+    """Sum prompt + completion tokens for the wire ``tokens`` field."""
+    if row.prompt_tokens is None and row.completion_tokens is None:
+        return None
+    return int(row.prompt_tokens or 0) + int(row.completion_tokens or 0)
 
 
 @router.post("/analyses")
@@ -114,7 +122,12 @@ def create_analysis(
         history_turns=len(history),
     )
     try:
-        analysis_id = run_agent(req.dataset_id, question, messages=history)
+        analysis_id = run_agent(
+            req.dataset_id,
+            question,
+            messages=history,
+            dataset_ids=req.dataset_ids,
+        )
     except ValueError as exc:
         # Defensive: run_agent raises ValueError for an unknown dataset; we
         # already validated above, so treat any other ValueError as a 400.
@@ -154,6 +167,58 @@ def create_analysis(
         return JSONResponse(status_code=422, content={"detail": detail})
 
     return ok(body.model_dump())
+
+
+@router.get("/analyses")
+def list_analyses(
+    dataset_id: str | None = None,
+    session: Session = Depends(get_session),
+) -> dict:
+    """History audit trail (Phase 3) — past analyses, newest first.
+
+    Optionally filtered to one dataset. Returns a compact per-run record with
+    the question, the code that ran, the answer, status, timestamps, and cost.
+    """
+    stmt = select(AnalysisRow).order_by(AnalysisRow.created_at.desc())
+    if dataset_id:
+        stmt = stmt.where(AnalysisRow.dataset_id == dataset_id)
+    rows = session.execute(stmt).scalars().all()
+    items = [
+        {
+            "analysis_id": r.id,
+            "dataset_id": r.dataset_id,
+            "question": r.question,
+            "code": r.code,
+            "answer": r.answer,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "estimated_cost_usd": r.estimated_cost_usd,
+        }
+        for r in rows
+    ]
+    return ok({"analyses": items})
+
+
+@router.get("/cost/daily")
+def cost_daily(session: Session = Depends(get_session)) -> dict:
+    """Running daily total of tokens + estimated cost (UTC day)."""
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = session.execute(
+        select(AnalysisRow).where(AnalysisRow.created_at >= day_start)
+    ).scalars().all()
+    total_tokens = sum(
+        int(r.prompt_tokens or 0) + int(r.completion_tokens or 0) for r in rows
+    )
+    total_cost = round(sum(float(r.estimated_cost_usd or 0.0) for r in rows), 6)
+    return ok(
+        {
+            "date": now.date().isoformat(),
+            "total_tokens": total_tokens,
+            "total_cost_usd": total_cost,
+        }
+    )
 
 
 @router.get("/analyses/{analysis_id}")

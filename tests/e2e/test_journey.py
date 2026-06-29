@@ -124,8 +124,10 @@ def test_frontend_renders_at_app(live_server):
     html = r.text
     # Real rendered content + the basePath-prefixed CSS bundle (proves styled).
     assert "/app/_next/static/css/" in html, "no built CSS bundle referenced — page is unstyled"
-    # A labelled stub must be present so the user never mistakes it for a bug.
-    assert "coming soon" in html.lower(), "expected at least one labelled 'coming soon' stub"
+    # Phase 3 completes the workspace — all "coming soon" stubs are now real.
+    # The workspace shell (and the Phase 3 library) must render.
+    assert "Analyst Workspace" in html, "workspace shell did not render"
+    assert "Dataset library" in html, "Phase 3 library sidebar did not render"
 
 
 def test_full_journey_upload_ask_answer(live_server):

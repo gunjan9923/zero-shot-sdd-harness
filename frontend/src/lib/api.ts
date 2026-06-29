@@ -142,3 +142,159 @@ export async function runAnalysis(datasetId: string, question: string): Promise<
   }
   return body.data as Analysis
 }
+
+// --- Phase 3: library, history, cost, streaming ----------------------------
+
+export interface DatasetListItem {
+  dataset_id: string
+  name: string
+  file_type: string
+  row_count: number
+  created_at: string | null
+}
+
+/** List persisted datasets for the library sidebar. GET /datasets */
+export async function listDatasets(): Promise<DatasetListItem[]> {
+  const res = await fetch('/datasets').catch(() => {
+    throw new ApiError(NETWORK_ERROR, 0)
+  })
+  const body = await parseJson(res)
+  if (!res.ok) throw new ApiError(detailMessage(body, res.status), res.status)
+  const data = body.data as { datasets?: DatasetListItem[] } | undefined
+  return data?.datasets ?? []
+}
+
+/** Delete a dataset and its file. DELETE /datasets/{id} */
+export async function deleteDataset(datasetId: string): Promise<void> {
+  const res = await fetch(`/datasets/${encodeURIComponent(datasetId)}`, {
+    method: 'DELETE',
+  }).catch(() => {
+    throw new ApiError(NETWORK_ERROR, 0)
+  })
+  if (!res.ok) {
+    const body = await parseJson(res)
+    throw new ApiError(detailMessage(body, res.status), res.status)
+  }
+}
+
+export interface DailyCost {
+  date: string
+  total_tokens: number
+  total_cost_usd: number
+}
+
+/** Running daily total of tokens + cost. GET /cost/daily */
+export async function fetchDailyCost(): Promise<DailyCost> {
+  const res = await fetch('/cost/daily').catch(() => {
+    throw new ApiError(NETWORK_ERROR, 0)
+  })
+  const body = await parseJson(res)
+  if (!res.ok) throw new ApiError(detailMessage(body, res.status), res.status)
+  return body.data as DailyCost
+}
+
+export interface HistoryItem {
+  analysis_id: string
+  dataset_id: string
+  question: string
+  code: string | null
+  answer: string | null
+  status: string
+  created_at: string | null
+  completed_at: string | null
+  estimated_cost_usd: number | null
+}
+
+/** Past analyses for the audit-trail history view. GET /analyses?dataset_id= */
+export async function listHistory(datasetId?: string): Promise<HistoryItem[]> {
+  const url = datasetId
+    ? `/analyses?dataset_id=${encodeURIComponent(datasetId)}`
+    : '/analyses'
+  const res = await fetch(url).catch(() => {
+    throw new ApiError(NETWORK_ERROR, 0)
+  })
+  const body = await parseJson(res)
+  if (!res.ok) throw new ApiError(detailMessage(body, res.status), res.status)
+  const data = body.data as { analyses?: HistoryItem[] } | undefined
+  return data?.analyses ?? []
+}
+
+/** Fetch a single analysis by id. GET /analyses/{id} */
+export async function getAnalysis(analysisId: string): Promise<Analysis> {
+  const res = await fetch(`/analyses/${encodeURIComponent(analysisId)}`).catch(() => {
+    throw new ApiError(NETWORK_ERROR, 0)
+  })
+  const body = await parseJson(res)
+  if (!res.ok) throw new ApiError(detailMessage(body, res.status), res.status)
+  return body.data as Analysis
+}
+
+/**
+ * Run an analysis with live progress via SSE. POST /analyses/stream.
+ * Calls `onStep` for each progress event, then resolves with the full Analysis
+ * (fetched on the terminal `done` event). One or more `dataset_ids` enables
+ * multi-file analysis. Falls back to the blocking endpoint on stream failure.
+ */
+export async function runAnalysisStream(
+  datasetIds: string[],
+  question: string,
+  onStep: (step: string) => void
+): Promise<Analysis> {
+  let res: Response
+  try {
+    res = await fetch('/analyses/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dataset_id: datasetIds[0],
+        question,
+        dataset_ids: datasetIds,
+      }),
+    })
+  } catch {
+    // Network/stream unavailable → fall back to the blocking path.
+    return runAnalysis(datasetIds[0], question)
+  }
+
+  if (!res.ok || !res.body) {
+    return runAnalysis(datasetIds[0], question)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let analysisId: string | null = null
+  let failed: { id: string } | null = null
+
+  // Read the SSE stream line-by-line; events are `data: {json}\n\n`.
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() ?? ''
+    for (const chunk of chunks) {
+      const line = chunk.split('\n').find(l => l.startsWith('data:'))
+      if (!line) continue
+      let evt: { step?: string; analysis_id?: string; status?: string }
+      try {
+        evt = JSON.parse(line.slice(5).trim())
+      } catch {
+        continue
+      }
+      if (evt.step && evt.step !== 'done') onStep(evt.step)
+      if (evt.step === 'done' && evt.analysis_id) {
+        analysisId = evt.analysis_id
+        if (evt.status === 'failed') failed = { id: evt.analysis_id }
+      }
+    }
+  }
+
+  if (!analysisId) return runAnalysis(datasetIds[0], question)
+
+  const analysis = await getAnalysis(analysisId)
+  if (failed) {
+    throw new ApiError(analysis.error || 'The agent could not produce a valid answer.', 422, analysis)
+  }
+  return analysis
+}

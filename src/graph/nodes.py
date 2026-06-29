@@ -30,6 +30,7 @@ from execution.sandbox import run_pandas
 from graph.state import AgentState
 from llm.client import LLMClient
 from observability.events import get_logger
+from observability.usage import add_usage
 
 _log = get_logger("agent.graph")
 _PROMPT_DIR = Path(__file__).parent.parent / "prompts"
@@ -63,13 +64,19 @@ def _call_gemini(system: str, prompt: str, *, node: str) -> str:
     for attempt in range(1, _LLM_MAX_ATTEMPTS + 1):
         started = time.monotonic()
         try:
-            out = LLMClient().call_model(prompt, system=system)
+            client = LLMClient()
+            out = client.call_model(prompt, system=system)
+            usage = client.last_usage
+            if usage:
+                add_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
             _log.info(
                 "llm_response",
                 node=node,
                 attempt=attempt,
                 latency_ms=round((time.monotonic() - started) * 1000, 1),
                 output_chars=len(out or ""),
+                prompt_tokens=(usage or {}).get("prompt_tokens"),
+                completion_tokens=(usage or {}).get("completion_tokens"),
             )
             return out
         except Exception as exc:  # noqa: BLE001 - retry transient, surface persistent
@@ -87,20 +94,42 @@ def _call_gemini(system: str, prompt: str, *, node: str) -> str:
 
 
 def _format_context(state: AgentState) -> str:
-    """Schema + samples + question + prior turns — the LLM-visible payload."""
-    schema = state.get("schema") or {}
-    samples = state.get("samples") or []
-    parts = [
-        f"SCHEMA (column: dtype):\n{json.dumps(schema, indent=2, default=str)}",
-        f"SAMPLE ROWS (first {len(samples)}):\n{json.dumps(samples, indent=2, default=str)}",
-        f"QUESTION:\n{state.get('question', '')}",
-    ]
+    """Schema + samples + question + prior turns — the LLM-visible payload.
+
+    With multiple files, each is described under its DataFrame variable name
+    (``df1``, ``df2``, …) so the model can write a join/comparison. Only schema
+    and bounded samples are shown — never the file path or full data.
+    """
+    files = state.get("files") or []
+    if len(files) > 1:
+        blocks = []
+        for f in files:
+            schema = f.get("schema") or {}
+            samples = f.get("samples") or []
+            blocks.append(
+                f"FILE {f.get('var')} (from {f.get('name')!r}):\n"
+                f"  SCHEMA (column: dtype):\n{json.dumps(schema, indent=2, default=str)}\n"
+                f"  SAMPLE ROWS (first {len(samples)}):\n{json.dumps(samples, indent=2, default=str)}"
+            )
+        parts = [
+            "AVAILABLE DATAFRAMES (each loaded under its variable name):\n"
+            + "\n\n".join(blocks),
+            f"QUESTION:\n{state.get('question', '')}",
+        ]
+    else:
+        schema = state.get("schema") or {}
+        samples = state.get("samples") or []
+        parts = [
+            f"SCHEMA (column: dtype):\n{json.dumps(schema, indent=2, default=str)}",
+            f"SAMPLE ROWS (first {len(samples)}):\n{json.dumps(samples, indent=2, default=str)}",
+            f"QUESTION:\n{state.get('question', '')}",
+        ]
     messages = state.get("messages") or []
     if messages:
         turns = "\n".join(
             f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages[-6:]
         )
-        parts.insert(2, f"PRIOR CONVERSATION:\n{turns}")
+        parts.insert(len(parts) - 1, f"PRIOR CONVERSATION:\n{turns}")
     return "\n\n".join(parts)
 
 
@@ -280,25 +309,37 @@ def execute_code(state: AgentState) -> AgentState:
     """
     dataset_id = state.get("dataset_id")
     code = state.get("code") or ""
+
+    # Build the sandbox namespace from the selected files. ``df`` is always the
+    # primary frame; multi-file runs also expose df1, df2, … by variable name.
+    files = state.get("files")
     try:
-        with create_db_session() as session:
-            ds = session.get(DatasetRow, dataset_id)
-            if ds is None:
-                return {
-                    **state,
-                    "exec_result": None,
-                    "exec_stdout": "",
-                    "exec_error": None,
-                    "error": f"dataset not found: {dataset_id}",
-                }
-            file_path, file_type = ds.file_path, ds.file_type
-        df = get_or_load(dataset_id, file_path, file_type)
+        namespace: dict[str, object] = {}
+        if files:
+            for f in files:
+                frame = get_or_load(f["dataset_id"], f["file_path"], f["file_type"])
+                namespace[f["var"]] = frame
+            # The primary frame is always available as ``df`` too.
+            namespace["df"] = namespace[files[0]["var"]]
+        else:
+            with create_db_session() as session:
+                ds = session.get(DatasetRow, dataset_id)
+                if ds is None:
+                    return {
+                        **state,
+                        "exec_result": None,
+                        "exec_stdout": "",
+                        "exec_error": None,
+                        "error": f"dataset not found: {dataset_id}",
+                    }
+                file_path, file_type = ds.file_path, ds.file_type
+            namespace["df"] = get_or_load(dataset_id, file_path, file_type)
     except Exception as exc:  # noqa: BLE001 - loading is fatal, not a code retry
         _log.error("execute_load_failed", run_id=state.get("run_id"), error=str(exc))
         return {**state, "error": f"failed to load dataset: {exc}"}
 
     timeout = _exec_timeout()
-    outcome = run_pandas(code, {"df": df}, timeout_s=timeout)
+    outcome = run_pandas(code, namespace, timeout_s=timeout)
     _log.info(
         "code_execution",
         run_id=state.get("run_id"),

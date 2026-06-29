@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api._common import api_error, ok
-from db.models import DatasetRow
+from db.models import AnalysisRow, DatasetRow
 from db.session import get_session
 from domain.dataset import (
     DatasetListItem,
@@ -26,6 +26,7 @@ from domain.dataset import (
     DatasetResponse,
 )
 from execution.loader import (
+    dataframe_cache,
     extract_samples,
     extract_schema,
     get_or_load,
@@ -148,6 +149,32 @@ def get_dataset_profile(
         raise api_error("NOT_FOUND", f"Dataset {dataset_id} not found", 404)
     profile = json.loads(ds.profile_json) if ds.profile_json else None
     return ok({"profile": profile})
+
+
+@router.delete("/datasets/{dataset_id}")
+def delete_dataset(
+    dataset_id: str,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Remove a dataset: delete its analyses, the DB row, the stored file, and
+    evict it from the in-process DataFrame cache (Phase 3 library management)."""
+    ds = session.get(DatasetRow, dataset_id)
+    if ds is None:
+        raise api_error("NOT_FOUND", f"Dataset {dataset_id} not found", 404)
+
+    # Remove dependent analyses first (FK integrity) and the stored file.
+    session.query(AnalysisRow).filter(AnalysisRow.dataset_id == dataset_id).delete()
+    file_path = ds.file_path
+    session.delete(ds)
+
+    try:
+        Path(file_path).unlink(missing_ok=True)
+    except OSError as exc:  # best-effort: row is gone regardless
+        _log.info("dataset_file_unlink_failed", dataset_id=dataset_id, error=str(exc))
+    dataframe_cache.pop(dataset_id, None)
+
+    _log.info("dataset_deleted", dataset_id=dataset_id)
+    return ok({"deleted": True})
 
 
 @router.get("/datasets")

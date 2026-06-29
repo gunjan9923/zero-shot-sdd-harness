@@ -99,10 +99,18 @@ REST over HTTP (FastAPI), single origin `http://localhost:8001`. JSON responses 
 **Purpose:** running daily total of tokens/cost.
 **Response:** `{ "data": { "date": "2026-06-29", "total_tokens": 12044, "total_cost_usd": 0.031 } }`
 
-### `GET /analyses/{analysis_id}/stream`  *(Phase 3 — SSE)*
+### `POST /analyses/stream`  *(Phase 3 — SSE)*
 
-**Purpose:** live node-status events while the agent works.
-**Response:** `text/event-stream`, events: `{"step":"planning"}`, `{"step":"running_code"}`, `{"step":"building_chart"}`, `{"step":"done","analysis_id":"uuid"}`.
+**Purpose:** run an analysis while streaming live node-status events. The run is
+created and executed in one shot, so the question arrives with the request (same
+body as `POST /analyses`, incl. optional `dataset_ids` for multi-file).
+
+**Request:** same JSON body as `POST /analyses`.
+**Response:** `text/event-stream`; each event is `data: {json}\n\n`. Ordered
+`{"step": <label>}` events — labels: `planning`, `generating_code`,
+`running_code`, `finalizing`, `building_chart`, `suggesting_followups` — then a
+terminal `{"step":"done","analysis_id":"uuid","status":"completed|failed"}`. The
+client fetches the full result via `GET /analyses/{analysis_id}`.
 
 ## Authentication
 

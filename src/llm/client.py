@@ -30,6 +30,11 @@ def _make_provider():
 class LLMClient:
     def __init__(self) -> None:
         self._provider = _make_provider()
+        # Token usage from the most recent call (None if the provider doesn't
+        # report it). Read by the graph to accumulate per-run cost.
+        self.last_usage: dict[str, int] | None = None
 
     def call_model(self, prompt: str, *, system: str | None = None) -> str:
-        return self._provider.call_model(prompt, system=system)
+        out = self._provider.call_model(prompt, system=system)
+        self.last_usage = getattr(self._provider, "last_usage", None)
+        return out
