@@ -18,6 +18,11 @@ import re
 import time
 from pathlib import Path
 
+from charts.spec import (
+    build_vega_lite_spec,
+    parse_chart_spec,
+    result_to_chart_records,
+)
 from db.models import DatasetRow
 from db.session import create_db_session
 from execution.loader import extract_samples, extract_schema, get_or_load
@@ -148,6 +153,59 @@ def _result_to_text(value: object) -> str:
     return text
 
 
+def _describe_result_shape(value: object, records: list | None) -> str:
+    """A privacy-safe, LLM-visible description of the computed result's SHAPE.
+
+    Sends only column names / index name / row-count — never the raw values —
+    so the chart prompt can pick fields without ever seeing the data.
+    """
+    try:
+        import pandas as pd
+
+        if isinstance(value, pd.DataFrame):
+            cols = [str(c) for c in value.columns]
+            idx = value.index.name
+            head = f"DataFrame with {len(value)} rows."
+            if idx is not None:
+                head += f" Index name: {idx!r} (becomes a column)."
+            return f"{head} Columns: {cols}"
+        if isinstance(value, pd.Series):
+            cat = value.index.name or "category"
+            val = value.name or "value"
+            return (
+                f"Series ({len(value)} entries) -> a breakdown with category "
+                f"field {cat!r} and value field {val!r}."
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    if records:
+        keys = sorted({k for r in records for k in r})
+        return f"Tabular result with {len(records)} rows. Fields: {keys}"
+    return "A single scalar value (not a breakdown)."
+
+
+def _parse_followups(text: str) -> list[str]:
+    """Parse the followups LLM response into a bounded list of 2–3 strings."""
+    if not text:
+        return []
+    stripped = text.strip()
+    fenced = re.search(r"```(?:json)?\s*\n?(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        stripped = fenced.group(1).strip()
+    items: list[str] = []
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, list):
+            items = [str(x).strip() for x in parsed if str(x).strip()]
+    except (ValueError, TypeError):
+        # Fallback: split lines, strip bullets/numbering.
+        for line in stripped.splitlines():
+            cleaned = re.sub(r"^\s*[-*\d.)\]]+\s*", "", line).strip().strip('"')
+            if cleaned:
+                items.append(cleaned)
+    return items[:3]
+
+
 def _result_to_json(value: object) -> str | None:
     """Best-effort JSON serialization of the result for persistence."""
     try:
@@ -272,6 +330,68 @@ def finalize(state: AgentState) -> AgentState:
     except Exception as exc:  # noqa: BLE001
         _log.error("finalize_failed", run_id=state.get("run_id"), error=str(exc))
         return {**state, "error": f"finalize failed: {exc}"}
+
+
+def render_chart(state: AgentState) -> AgentState:
+    """Gemini: emit a Vega-Lite spec skeleton; embed the LOCALLY-computed data.
+
+    The LLM sees only the question, plan, schema, and the SHAPE of the result —
+    never raw values. It returns a mark+encoding skeleton (or NONE). This node
+    embeds the real, locally-computed result as ``data.values`` so the chart
+    shows true numbers. Charting is best-effort: any failure degrades to no
+    chart (the numeric answer still stands) — it never aborts the run.
+    """
+    try:
+        records = result_to_chart_records(state.get("exec_result"))
+        if not records:
+            _log.info("chart_skipped", run_id=state.get("run_id"), reason="not_chartable")
+            return {**state, "chart_spec": None}
+
+        system = _load_prompt("chart.md")
+        schema = state.get("schema") or {}
+        shape = _describe_result_shape(state.get("exec_result"), records)
+        prompt = (
+            f"QUESTION:\n{state.get('question', '')}\n\n"
+            f"PLAN:\n{state.get('plan', '')}\n\n"
+            f"SCHEMA (column: dtype):\n{json.dumps(schema, indent=2, default=str)}\n\n"
+            f"RESULT SHAPE (no values shown):\n{shape}"
+        )
+        out = _call_gemini(system, prompt, node="render_chart")
+        skeleton = parse_chart_spec(out)
+        spec = build_vega_lite_spec(skeleton, records)
+        _log.info(
+            "chart_built",
+            run_id=state.get("run_id"),
+            charted=spec is not None,
+            rows=len(records),
+        )
+        return {**state, "chart_spec": spec}
+    except Exception as exc:  # noqa: BLE001 - degrade, never abort
+        _log.warning("render_chart_failed", run_id=state.get("run_id"), error=str(exc))
+        return {**state, "chart_spec": None}
+
+
+def suggest_followups(state: AgentState) -> AgentState:
+    """Gemini: 2–3 short follow-up questions building on the answer.
+
+    Best-effort: a failure yields an empty list rather than aborting the run.
+    """
+    try:
+        system = _load_prompt("followups.md")
+        schema = state.get("schema") or {}
+        prompt = (
+            f"QUESTION:\n{state.get('question', '')}\n\n"
+            f"PLAN:\n{state.get('plan', '')}\n\n"
+            f"SCHEMA (column: dtype):\n{json.dumps(schema, indent=2, default=str)}\n\n"
+            f"ANSWER:\n{state.get('answer', '')}"
+        )
+        out = _call_gemini(system, prompt, node="suggest_followups")
+        followups = _parse_followups(out)
+        _log.info("followups_built", run_id=state.get("run_id"), count=len(followups))
+        return {**state, "followups": followups or None}
+    except Exception as exc:  # noqa: BLE001 - degrade, never abort
+        _log.warning("suggest_followups_failed", run_id=state.get("run_id"), error=str(exc))
+        return {**state, "followups": None}
 
 
 def handle_error(state: AgentState) -> AgentState:

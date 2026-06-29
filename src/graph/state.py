@@ -35,5 +35,9 @@ class AgentState(TypedDict, total=False):
     answer: str                       # final plain-language answer (finalize node)
     status: str                       # "completed" | "failed"
 
+    # Phase 2 — insight layer
+    chart_spec: dict | None           # Vega-Lite spec (data embedded) or None (render_chart)
+    followups: list | None            # 2–3 suggested follow-up questions (suggest_followups)
+
     # Control
     error: str | None                 # fatal error → handle_error

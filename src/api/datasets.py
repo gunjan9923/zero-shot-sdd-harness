@@ -31,6 +31,7 @@ from execution.loader import (
     get_or_load,
     load_dataset,
 )
+from execution.profiler import profile_dataset
 from observability.events import get_logger
 
 router = APIRouter()
@@ -86,6 +87,14 @@ def create_dataset(
     row_count = int(len(df))
     size_bytes = int(stored_path.stat().st_size)
 
+    # Auto-profile the full DataFrame locally (Phase 2). Best-effort: a profiling
+    # failure must never fail the upload — the dataset is still usable.
+    try:
+        profile = profile_dataset(df)
+    except Exception as exc:  # noqa: BLE001
+        _log.info("dataset_profile_failed", name=original_name, error=str(exc))
+        profile = None
+
     ds = DatasetRow(
         name=original_name,
         file_path=str(stored_path),
@@ -93,6 +102,7 @@ def create_dataset(
         row_count=row_count,
         schema_json=json.dumps(schema),
         samples_json=json.dumps(samples),
+        profile_json=json.dumps(profile) if profile is not None else None,
         size_bytes=size_bytes,
     )
     session.add(ds)
@@ -122,9 +132,22 @@ def create_dataset(
         row_count=row_count,
         schema_=schema,
         samples=samples,
-        profile=None,
+        profile=profile,
     )
     return ok(body.model_dump(by_alias=True))
+
+
+@router.get("/datasets/{dataset_id}/profile")
+def get_dataset_profile(
+    dataset_id: str,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Fetch the auto-profile for a dataset (Phase 2)."""
+    ds = session.get(DatasetRow, dataset_id)
+    if ds is None:
+        raise api_error("NOT_FOUND", f"Dataset {dataset_id} not found", 404)
+    profile = json.loads(ds.profile_json) if ds.profile_json else None
+    return ok({"profile": profile})
 
 
 @router.get("/datasets")

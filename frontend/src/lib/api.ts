@@ -5,6 +5,22 @@
 export type Schema = Record<string, string>
 export type SampleRow = Record<string, unknown>
 
+/** Per-column auto-profile (Phase 2). Numeric columns carry min/max/mean;
+ *  categorical columns carry `top` value counts. `missing` is always present. */
+export interface ColumnProfile {
+  type?: string
+  missing?: number
+  min?: number | string | null
+  max?: number | string | null
+  mean?: number | string | null
+  top?: Array<{ value: unknown; count: number }> | Record<string, number> | null
+}
+
+export type DatasetProfile = Record<string, ColumnProfile>
+
+/** A Vega-Lite spec object returned with an analysis (Phase 2). */
+export type ChartSpec = Record<string, unknown>
+
 export interface Dataset {
   dataset_id: string
   name: string
@@ -12,7 +28,7 @@ export interface Dataset {
   row_count: number
   schema: Schema
   samples: SampleRow[]
-  profile: unknown | null
+  profile: DatasetProfile | null
 }
 
 export interface Analysis {
@@ -23,8 +39,8 @@ export interface Analysis {
   code: string | null
   result: unknown
   retry_count: number
-  chart_spec: unknown | null
-  followups: unknown | null
+  chart_spec: ChartSpec | null
+  followups: string[] | null
   tokens: number | null
   estimated_cost_usd: number | null
   error: string | null
@@ -78,6 +94,24 @@ export async function uploadDataset(file: File): Promise<Dataset> {
     throw new ApiError(detailMessage(body, res.status), res.status)
   }
   return (body.data as Dataset)
+}
+
+/** Fetch a dataset's auto-profile. GET /datasets/{id}/profile (Phase 2).
+ *  Used when the upload response did not already embed the profile inline. */
+export async function fetchProfile(datasetId: string): Promise<DatasetProfile | null> {
+  let res: Response
+  try {
+    res = await fetch(`/datasets/${encodeURIComponent(datasetId)}/profile`)
+  } catch {
+    throw new ApiError(NETWORK_ERROR, 0)
+  }
+
+  const body = await parseJson(res)
+  if (!res.ok) {
+    throw new ApiError(detailMessage(body, res.status), res.status)
+  }
+  const data = body.data as { profile?: DatasetProfile | null } | undefined
+  return data?.profile ?? null
 }
 
 /** Ask a question about a dataset. POST /analyses (JSON). */

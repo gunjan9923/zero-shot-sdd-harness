@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api._common import api_error, ok
@@ -37,6 +38,39 @@ def _parse_result(result_json: str | None) -> Any | None:
         return result_json
 
 
+def _parse_json(value: str | None) -> Any | None:
+    """Parse a stored JSON column, tolerating null/legacy non-JSON text."""
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_history(session: Session, dataset_id: str) -> list[dict[str, str]]:
+    """Reconstruct conversation history from prior completed analyses.
+
+    The API request shape is fixed (no client-sent transcript), so follow-up
+    context is derived server-side from earlier completed Q&A on the SAME
+    dataset, oldest-first. Only the question + answer text is threaded — never
+    raw data — preserving the schema+samples-only privacy boundary.
+    """
+    rows = session.execute(
+        select(AnalysisRow)
+        .where(AnalysisRow.dataset_id == dataset_id)
+        .where(AnalysisRow.status == "completed")
+        .order_by(AnalysisRow.created_at.asc())
+    ).scalars().all()
+    history: list[dict[str, str]] = []
+    for r in rows:
+        if r.question:
+            history.append({"role": "user", "content": r.question})
+        if r.answer:
+            history.append({"role": "assistant", "content": r.answer})
+    return history
+
+
 def _to_response(row: AnalysisRow) -> AnalysisResponse:
     """Build the wire response from a persisted AnalysisRow."""
     return AnalysisResponse(
@@ -47,8 +81,8 @@ def _to_response(row: AnalysisRow) -> AnalysisResponse:
         code=row.code,
         result=_parse_result(row.result_json),
         retry_count=int(row.retry_count or 0),
-        chart_spec=None,        # Phase 2
-        followups=None,         # Phase 2
+        chart_spec=_parse_json(row.chart_spec_json),  # Phase 2
+        followups=_parse_json(row.followups_json),     # Phase 2
         tokens=None,            # Phase 3
         estimated_cost_usd=None,  # Phase 3
         error=row.error_message,
@@ -69,9 +103,18 @@ def create_analysis(
     if ds is None:
         raise api_error("BAD_REQUEST", f"Unknown dataset_id: {req.dataset_id}", 400)
 
-    _log.info("analysis_start", dataset_id=req.dataset_id, question_len=len(question))
+    # Thread prior Q&A on this dataset so follow-ups ("now by region") resolve
+    # in context. Built before the run so the current question is excluded.
+    history = _build_history(session, req.dataset_id)
+
+    _log.info(
+        "analysis_start",
+        dataset_id=req.dataset_id,
+        question_len=len(question),
+        history_turns=len(history),
+    )
     try:
-        analysis_id = run_agent(req.dataset_id, question)
+        analysis_id = run_agent(req.dataset_id, question, messages=history)
     except ValueError as exc:
         # Defensive: run_agent raises ValueError for an unknown dataset; we
         # already validated above, so treat any other ValueError as a 400.

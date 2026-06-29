@@ -73,7 +73,9 @@ def test_upload_dataset_returns_schema_and_row_count(api_client):
     assert schema["amount"] == "float64"
     assert schema["region"] in ("object", "str")
     assert isinstance(data["samples"], list) and len(data["samples"]) == 3
-    assert data["profile"] is None
+    # Phase 2: upload now auto-profiles the dataset (was a None stub in Phase 1).
+    assert isinstance(data["profile"], dict)
+    assert data["profile"]["amount"]["missing"] == 0
 
 
 def test_analysis_computes_real_sum_and_get_roundtrip(api_client):

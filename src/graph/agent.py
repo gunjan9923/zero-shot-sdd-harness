@@ -1,7 +1,15 @@
 from langgraph.graph import StateGraph, END
 
 from graph.state import AgentState
-from graph.nodes import plan, generate_code, execute_code, finalize, handle_error
+from graph.nodes import (
+    plan,
+    generate_code,
+    execute_code,
+    finalize,
+    render_chart,
+    suggest_followups,
+    handle_error,
+)
 from graph.edges import after_execute
 
 
@@ -12,6 +20,8 @@ def _build_graph():
     graph.add_node("generate_code", generate_code)
     graph.add_node("execute_code", execute_code)
     graph.add_node("finalize", finalize)
+    graph.add_node("render_chart", render_chart)
+    graph.add_node("suggest_followups", suggest_followups)
     graph.add_node("handle_error", handle_error)
 
     graph.set_entry_point("plan")
@@ -36,7 +46,16 @@ def _build_graph():
         },
     )
 
-    graph.add_edge("finalize", END)
+    # After a successful finalize, run the insight layer (chart + follow-ups).
+    # Both nodes degrade internally to None and never set ``error``, so the
+    # numeric answer always stands even if charting/suggestions fail.
+    graph.add_conditional_edges(
+        "finalize",
+        lambda s: "handle_error" if s.get("error") else "render_chart",
+        {"handle_error": "handle_error", "render_chart": "render_chart"},
+    )
+    graph.add_edge("render_chart", "suggest_followups")
+    graph.add_edge("suggest_followups", END)
     graph.add_edge("handle_error", END)
 
     return graph.compile()

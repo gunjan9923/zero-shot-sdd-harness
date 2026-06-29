@@ -102,6 +102,10 @@ def run_agent(
         analysis.code = final.get("code")
         analysis.result_json = _result_to_json(final.get("exec_result"))
         analysis.answer = final.get("answer")
+        chart_spec = final.get("chart_spec")
+        analysis.chart_spec_json = json.dumps(chart_spec) if chart_spec else None
+        followups = final.get("followups")
+        analysis.followups_json = json.dumps(followups) if followups else None
         analysis.status = status
         analysis.error_message = final.get("error") if status == "failed" else None
         analysis.retry_count = int(final.get("retry_count", 0) or 0)

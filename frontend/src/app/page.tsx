@@ -6,6 +6,9 @@ import { Upload } from '@/components/Upload'
 import { QuestionInput } from '@/components/QuestionInput'
 import { Answer } from '@/components/Answer'
 import { Working } from '@/components/Working'
+import { Profile } from '@/components/Profile'
+import { Chart } from '@/components/Chart'
+import { Followups } from '@/components/Followups'
 import { StubPanel, ComingSoonPill } from '@/components/Stub'
 
 export default function Home() {
@@ -34,13 +37,18 @@ export default function Home() {
     }
   }
 
-  async function handleAsk() {
-    if (!dataset || !question.trim()) return
+  // Run an analysis for an explicit question. Used by the Ask button (current
+  // input) and by follow-up chips (the chip text). Conversation context is
+  // threaded server-side from prior answers on this dataset.
+  async function ask(q: string) {
+    const trimmed = q.trim()
+    if (!dataset || !trimmed) return
+    setQuestion(trimmed)
     setAsking(true)
     setAnalysisError(null)
     setAnalysis(null)
     try {
-      const result = await runAnalysis(dataset.dataset_id, question.trim())
+      const result = await runAnalysis(dataset.dataset_id, trimmed)
       setAnalysis(result)
     } catch (err) {
       if (err instanceof ApiError) {
@@ -92,7 +100,7 @@ export default function Home() {
       </header>
 
       <main className="mx-auto grid max-w-6xl grid-cols-1 gap-6 px-4 py-6 lg:grid-cols-[260px_1fr]">
-        {/* Left sidebar — Dataset library (stub) */}
+        {/* Left sidebar — Dataset library (stub, Phase 3) */}
         <aside className="space-y-4">
           <StubPanel
             title="Dataset library"
@@ -109,16 +117,13 @@ export default function Home() {
             onUpload={handleUpload}
           />
 
-          {/* Profile (stub) */}
-          <StubPanel
-            title="Profile"
-            hint="Auto-detected columns, types, ranges, and missing-value counts."
-          />
+          {/* Auto-profile (Phase 2) — appears once a dataset is uploaded */}
+          {dataset && <Profile profile={dataset.profile} rowCount={dataset.row_count} />}
 
           <QuestionInput
             value={question}
             onChange={setQuestion}
-            onAsk={handleAsk}
+            onAsk={() => ask(question)}
             noDataset={!dataset}
             loading={asking}
           />
@@ -137,6 +142,14 @@ export default function Home() {
 
           {!asking && analysis && <Answer analysis={analysis} />}
 
+          {/* Interactive chart (Phase 2) — only when the answer warrants one */}
+          {!asking && analysis && <Chart spec={analysis.chart_spec} />}
+
+          {/* Clickable follow-up suggestions (Phase 2) */}
+          {!asking && analysis && (
+            <Followups followups={analysis.followups} onPick={ask} disabled={asking} />
+          )}
+
           {!asking && !analysis && !analysisError && (
             <p className="rounded-lg border border-dashed border-gray-200 bg-white px-4 py-8 text-center text-sm text-gray-400">
               {dataset
@@ -144,18 +157,6 @@ export default function Home() {
                 : 'Upload a dataset, then ask a question.'}
             </p>
           )}
-
-          {/* Charts (stub) */}
-          <StubPanel
-            title="Charts"
-            hint="Interactive (hover / zoom) charts auto-generated for your answers."
-          />
-
-          {/* Follow-up suggestions (stub) */}
-          <StubPanel
-            title="Suggested follow-ups"
-            hint="Clickable next questions that carry the conversation context."
-          />
         </section>
       </main>
     </div>
