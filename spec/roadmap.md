@@ -57,14 +57,14 @@ Answering ad-hoc questions about a spreadsheet today means either (a) writing pa
   - `agent-graph` (backend) — extends `AgentState` and the LangGraph nodes (plan → generate_code → execute_code → reflect/retry → finalize → handle_error), prompts, and runner. Deps: `sandbox` (calls the sandbox), `db-migration` (writes `analyses`). Serializes after those two.
   - `api-routes` (backend) — upload, ask, get-analysis endpoints (`src/api/datasets.py`, `src/api/analyses.py`) + domain models. Deps: `agent-graph` (invokes the runner), `db-migration`. Serializes after those.
   - `frontend` (frontend) — real upload + ask + answer + collapsible-code UI in `frontend/src/app/page.tsx` and components; labelled stubs for charts/multi-file/library/cost/profiling/suggestions/streaming/history. Deps: none (codes against the documented API contract in `spec/api.md`).
-  - `e2e` (test) — Playwright smoke test under `tests/e2e/` for the upload→ask→answer journey. Deps: `frontend`, `api-routes`.
+  - `e2e` (test) — pytest live-server journey test under `tests/e2e/` for the upload→ask→answer journey (boots the real server, real HTTP + real Gemini, asserts the served styled /app/ page and the real computed answer). Deps: `frontend`, `api-routes`.
 - **Key surfaces / files:**
   - `db-migration`: `src/db/models.py` (add `DatasetRow`, `AnalysisRow`), `alembic/versions/0001_datasets_analyses.py`
   - `sandbox`: `src/execution/sandbox.py`, `src/execution/loader.py`
   - `agent-graph`: `src/graph/state.py`, `src/graph/nodes.py`, `src/graph/edges.py`, `src/graph/agent.py`, `src/graph/runner.py`, `src/prompts/plan.md`, `src/prompts/generate_code.md`
   - `api-routes`: `src/api/datasets.py`, `src/api/analyses.py`, `src/api/__init__.py` (mount routers), `src/domain/dataset.py`, `src/domain/analysis.py`
   - `frontend`: `frontend/src/app/page.tsx`, `frontend/src/components/*`
-  - `e2e`: `tests/e2e/upload_ask.spec.ts`, `playwright.config.ts`
+  - `e2e`: `tests/e2e/test_journey.py` (pytest live-server journey — boots `uv run python -m src`, real HTTP, real Gemini; the harness-native `uv run pytest tests/e2e` gate), `tests/e2e/fixtures/sales.csv`
 - **Gate command:** `uv run alembic upgrade head && uv run pytest tests/phase1 -q && (cd frontend && pnpm build) && uv run pytest tests/e2e -q`
   - The backend test in `tests/phase1` uploads a real fixture CSV **large enough (≥ 200k rows)** that a sampled answer and a full-data answer differ, calls the real Gemini API via `.env`, runs the generated pandas in the sandbox, and asserts the returned number equals the full-data pandas computation (not the sample). SQLite is the production driver here (single-user local tool), so tests use SQLite by design.
 - **How the user tests it (handoff seed):**

@@ -17,3 +17,4 @@ build/
 *.db-wal
 data/
 frontend/out/
+data/e2e_srv_*.log
